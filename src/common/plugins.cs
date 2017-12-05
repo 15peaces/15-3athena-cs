@@ -2,12 +2,19 @@
 // C# - Remake Copyright © 15peaces 2017
 // For more information, see LICENCE in the main folder
 
+using showmsg;
+using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace n_plugins
 {
     public class plugins
     {
+        const string DLL_EXT = ".dll";
+
+        static short auto_search = 0;
+
         struct EVENT
         {
             public const string PLUGIN_INIT    = "Plugin_Init";  // Initialize the plugin
@@ -40,9 +47,6 @@ namespace n_plugins
             // 1.03
             PARSE_CONSOLE
         }
-
-        string PLUGIN_CONF_FILENAME = @"conf\plugin_athena.conf";
-
         static List<Plugin_Event_List> PluginEventList;
 
         struct Plugin_Event_List
@@ -82,6 +86,8 @@ namespace n_plugins
 
         static plugins()
         {
+            string PLUGIN_CONF_FILENAME = @"conf\plugin_athena.conf";
+
             // Sugested functionality:
             // add atcommands/script commands [Borf]
             PluginEventList = new List<Plugin_Event_List>();
@@ -107,6 +113,62 @@ namespace n_plugins
             export_symbol("add_timer", new string[4], E_SYMBOL.ADD_TIMER);
             export_symbol("get_svn_revision", null, E_SYMBOL.GET_SVN_REVISION);
             export_symbol("gettick", null, E_SYMBOL.GETTICK);
+            // core
+            export_symbol("parse_console", null, E_SYMBOL.PARSE_CONSOLE);
+            export_symbol("runflag", null, E_SYMBOL.RUNFLAG);
+            export_symbol("arg_v", null, E_SYMBOL.ARG_V);
+            export_symbol("arg_c", null, E_SYMBOL.ARG_C);
+            export_symbol("SERVER_NAME", null, E_SYMBOL.SERVER_NAME);
+            export_symbol("SERVER_TYPE", null, E_SYMBOL.SERVER_TYPE);
+
+            config_read(PLUGIN_CONF_FILENAME);
+        }
+
+        static private void config_read(string cfgName)
+        {
+            string[] lines;
+            string[] w;
+            StreamReader fs;
+
+            string file = Directory.GetCurrentDirectory() + @"\" + cfgName;
+
+            if (!File.Exists(file))
+            {
+                console.error("File not found: " + cfgName);
+                return;
+            }
+
+            fs = new StreamReader(file);
+            lines = fs.ReadToEnd().Split(Environment.NewLine.ToCharArray(), StringSplitOptions.RemoveEmptyEntries);
+
+            for (int i = 0; i < lines.GetLength(0); i++)
+            {
+                if (lines[i].StartsWith("//"))
+                    continue;
+
+                w = lines[i].Split(':');
+                if (w.Length != 2)
+                    continue;
+
+                w[0] = w[0].Trim();
+                w[1] = w[1].Trim();
+
+                switch (w[0])
+                {
+                    case "auto_search":
+                        auto_search = n_common.common.config_switch(w[1]);
+                        break;
+                    case "plugin":
+                        plugin_load(w[1]+DLL_EXT);
+                        break;
+                    case "import":
+                        config_read(w[1]);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            return;
         }
     }
 }
