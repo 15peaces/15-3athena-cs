@@ -3,9 +3,12 @@
 // For more information, see LICENCE in the main folder
 
 using showmsg;
+using n_plugins_inc;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
 
 namespace n_plugins
 {
@@ -15,113 +18,42 @@ namespace n_plugins
 
         static short auto_search = 0;
 
-        struct EVENT
+        static List<PluginList> Plugins;
+
+        struct PluginList
         {
-            public const string PLUGIN_INIT    = "Plugin_Init";  // Initialize the plugin
-            public const string PLUGIN_FINAL   = "Plugin_Final"; // Finalize the plugin
-            public const string ATHENA_INIT    = "Athena_Init";  // Server started
-            public const string ATHENA_FINAL   = "Athena_Final"; // Server ended
+            ushort id;
+            public Plugin plugin;
+            public plugin_inc.PluginInfo info;
         }
 
-        enum E_SYMBOL
+        struct Plugin
         {
-            SERVER_TYPE,
-            SERVER_NAME,
-            ARG_C,
-            ARG_V,
-            RUNFLAG,
-            GETTICK,
-            GET_SVN_REVISION,
-            ADD_TIMER,
-            ADD_TIMER_INTERVAL,
-            ADD_TIMER_FUNC_LIST,
-            DELETE_TIMER,
-            GET_UPTIME,
-            ADDR,
-            FD_MAX,
-            SESSION,
-            DELETE_SESSION,
-            WFIFOSET,
-            RFIFOSKIP,
-            FUNC_PARSE_TABLE,
-            // 1.03
-            PARSE_CONSOLE
-        }
-        static List<Plugin_Event_List> PluginEventList;
-
-        struct Plugin_Event_List
-        {
-            public string name;
-        }
-
-        static List<Plugin_Call_Table> PluginCallTable;
-
-        struct Plugin_Call_Table
-        {
-            public string var;
-            public string[] args;
-            public E_SYMBOL offset;
-        }
-
-
-
-        static void register_plugin_func(string name)
-        {
-            if (name != "")
-            {
-                PluginEventList.Add(new Plugin_Event_List { name = name });
-            }
-        }
-
-        ////// Plugins Call Table Functions /////////
-
-        static void export_symbol(string var, string[] args, E_SYMBOL offset)
-        {
-            // add to the end of the list
-            if (offset < 0)
-                offset = (E_SYMBOL)PluginCallTable.Count;
-
-            PluginCallTable.Add(new Plugin_Call_Table { var = var, args = args, offset = offset });
+            public string filename;
+            public short state;
+            public IntPtr dll;
         }
 
         static plugins()
         {
             string PLUGIN_CONF_FILENAME = @"conf\plugin_athena.conf";
 
-            // Sugested functionality:
-            // add atcommands/script commands [Borf]
-            PluginEventList = new List<Plugin_Event_List>();
-
-            register_plugin_func(EVENT.PLUGIN_INIT);
-            register_plugin_func(EVENT.PLUGIN_FINAL);
-            register_plugin_func(EVENT.ATHENA_INIT);
-            register_plugin_func(EVENT.ATHENA_FINAL);
-
-            PluginCallTable = new List<Plugin_Call_Table>();
-
-            // networking
-            export_symbol("RFIFOSKIP", new string[2], E_SYMBOL.RFIFOSKIP);
-            export_symbol("WFIFOSET", new string[2], E_SYMBOL.WFIFOSET);
-            export_symbol("do_close", new string[1], E_SYMBOL.DELETE_SESSION);
-            export_symbol("session", null, E_SYMBOL.SESSION);
-            export_symbol("fd_max", null, E_SYMBOL.FD_MAX);
-            export_symbol("addr_", null, E_SYMBOL.ADDR);
-            // timers
-            export_symbol("get_uptime", null, E_SYMBOL.GET_UPTIME);
-            export_symbol("delete_timer", new string[2], E_SYMBOL.DELETE_TIMER);
-            export_symbol("add_timer_func_list", new string[2], E_SYMBOL.ADD_TIMER_FUNC_LIST);
-            export_symbol("add_timer", new string[4], E_SYMBOL.ADD_TIMER);
-            export_symbol("get_svn_revision", null, E_SYMBOL.GET_SVN_REVISION);
-            export_symbol("gettick", null, E_SYMBOL.GETTICK);
-            // core
-            export_symbol("parse_console", null, E_SYMBOL.PARSE_CONSOLE);
-            export_symbol("runflag", null, E_SYMBOL.RUNFLAG);
-            export_symbol("arg_v", null, E_SYMBOL.ARG_V);
-            export_symbol("arg_c", null, E_SYMBOL.ARG_C);
-            export_symbol("SERVER_NAME", null, E_SYMBOL.SERVER_NAME);
-            export_symbol("SERVER_TYPE", null, E_SYMBOL.SERVER_TYPE);
+            Plugins = new List<PluginList>();
 
             config_read(PLUGIN_CONF_FILENAME);
+        }
+
+        static class DllFunc
+        {
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr LoadLibrary(string dllToLoad);
+
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr GetProcAddress(IntPtr hModule, string procedureName);
+
+
+            [DllImport("kernel32.dll")]
+            public static extern bool FreeLibrary(IntPtr hModule);
         }
 
         static private void config_read(string cfgName)
@@ -159,7 +91,7 @@ namespace n_plugins
                         auto_search = n_common.common.config_switch(w[1]);
                         break;
                     case "plugin":
-                        plugin_load(w[1]+DLL_EXT);
+                        plugin_load(@"plugins\" + w[1] + DLL_EXT);
                         break;
                     case "import":
                         config_read(w[1]);
@@ -169,6 +101,85 @@ namespace n_plugins
                 }
             }
             return;
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void GetPluginInfo(ref plugin_inc.PluginInfo iStruct);
+
+        static Plugin? plugin_load(string filename)
+        {
+            Plugin plugin;
+            plugin_inc.PluginInfo info;
+
+            console.debug("plugin_load("+filename+")");
+
+            // Check if the plugin has been loaded before
+            for (int i = 0; i < Plugins.Count; i++)
+            {
+                // returns handle to the already loaded plugin
+                if (Plugins[i].plugin.state > 0 && Plugins[i].plugin.filename == filename)
+                {
+                    console.warning("plugin_load: not loaded (duplicate) : '"+filename+"'");
+                    return Plugins[i].plugin;
+                }
+            }
+
+            plugin = new Plugin();
+            info = new plugin_inc.PluginInfo();
+            plugin.filename = filename;
+            plugin.state = -1;  // not loaded
+
+            plugin.dll = DllFunc.LoadLibrary(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), filename));
+            if (plugin.dll == IntPtr.Zero)
+            {
+                console.warning("plugin_load: not loaded (invalid file) : '" + filename + "'");
+                return null;
+            }
+
+            // Retrieve plugin information
+            plugin.state = 0;  // initialising
+
+            IntPtr GetInfoFunc = DllFunc.GetProcAddress(plugin.dll, "GetPluginInfo");
+            if (GetInfoFunc == IntPtr.Zero)
+            {
+                console.debug("plugin_load: plugin_info not found");
+                return null;
+            }
+
+            GetPluginInfo GetPluginInfo = (GetPluginInfo)Marshal.GetDelegateForFunctionPointer(GetInfoFunc,typeof(GetPluginInfo));
+            GetPluginInfo(ref info);
+
+            console.debug("plugin_load: Found plugin: "+info.name+" Version "+info.version+".");
+
+            /*
+            // For high priority plugins (those that are explicitly loaded from the conf file)
+            // we'll ignore them even (could be a 3rd party dll file)
+            if (!info)
+            {// foreign plugin
+             //ShowDebug("plugin_open: plugin_info not found\n");
+                if (load_priority == 0)
+                {// not requested
+                 //ShowDebug("plugin_open: not loaded (not requested) : '"CL_WHITE"%s"CL_RESET"'\n", filename);
+                    plugin_unload(plugin);
+                    return NULL;
+                }
+            }
+            else if (!plugin_iscompatible(info->req_version))
+            {// incompatible version
+                ShowWarning("plugin_open: not loaded (incompatible version '%s' -> '%s') : '"CL_WHITE"%s"CL_RESET"'\n", info->req_version, PLUGIN_VERSION, filename);
+                plugin_unload(plugin);
+                return NULL;
+            }
+            else if ((info->type != PLUGIN_ALL && info->type != PLUGIN_CORE && info->type != SERVER_TYPE) ||
+              (info->type == PLUGIN_CORE && SERVER_TYPE != PLUGIN_LOGIN && SERVER_TYPE != PLUGIN_CHAR && SERVER_TYPE != PLUGIN_MAP))
+            {// not for this server
+             //ShowDebug("plugin_open: not loaded (incompatible) : '"CL_WHITE"%s"CL_RESET"'\n", filename);
+                plugin_unload(plugin);
+                return NULL;
+            }
+            */
+
+            return plugin;
         }
     }
 }

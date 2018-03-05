@@ -195,7 +195,7 @@ namespace n_socket
             return ret;
         }
 
-        static private int config_read(string cfgName)
+        static private void config_read(string cfgName)
         {
             string[] lines;
             string[] w;
@@ -206,7 +206,7 @@ namespace n_socket
             if (!File.Exists(file))
             {
                 console.error("File not found: " + cfgName);
-                return 1;
+                return;
             }
 
             fs = new StreamReader(file);
@@ -316,7 +316,7 @@ namespace n_socket
                         break;
                 }
             }
-            return 1;
+            return;
         }
 
         /// Retrieve local ips in host byte order.
