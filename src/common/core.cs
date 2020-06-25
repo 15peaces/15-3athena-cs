@@ -1,8 +1,11 @@
 // Copyright (c) Athena Dev Teams - Licensed under GNU GPL
 // C# - Remake Copyright © 15peaces 2017
 // For more information, see LICENCE in the main folder
-using System;
+using System.Reflection;
+using System.Linq;
+
 using showmsg;
+
 
 namespace n_core
 {
@@ -33,13 +36,22 @@ namespace n_core
             console.message("         (     -enhanced with 3rd class modification (15-3athena)      )     ", console.e_color.CL_DARK_READ, console.e_color.CL_CYAN);
             console.message("         (                  -re-written in modern C#                   )     ", console.e_color.CL_DARK_READ, console.e_color.CL_CYAN);
             console.message("         (=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=)     ", console.e_color.CL_DARK_READ, console.e_color.CL_CYAN);
-            // console.information("Git Hash: '"CL_WHITE"%s"CL_RESET"'.\n", get_svn_revision()); // TODO: ADD GIT-HASH once there is one!
+            console.information("Git Hash: " + GetGitHash());
         }
 
         // Won't do anything if runned alone...
         static int Main()
         {
             return 0;
+        }
+
+        /// <summary> Gets the git hash value from the assembly
+        /// or null if it cannot be found. </summary>
+        public static string GetGitHash()
+        {
+            var asm = typeof(core).Assembly;
+            var attrs = asm.GetCustomAttributes<AssemblyMetadataAttribute>();
+            return attrs.FirstOrDefault(a => a.Key == "GitHash")?.Value;
         }
     }
 }

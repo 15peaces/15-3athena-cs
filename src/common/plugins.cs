@@ -111,7 +111,7 @@ namespace n_plugins
             Plugin plugin;
             plugin_inc.PluginInfo info;
 
-            console.debug("plugin_load("+filename+")");
+            //console.debug("plugin_load("+filename+")");
 
             // Check if the plugin has been loaded before
             for (int i = 0; i < Plugins.Count; i++)
@@ -142,14 +142,14 @@ namespace n_plugins
             IntPtr GetInfoFunc = DllFunc.GetProcAddress(plugin.dll, "GetPluginInfo");
             if (GetInfoFunc == IntPtr.Zero)
             {
-                console.debug("plugin_load: plugin_info not found");
+                //console.debug("plugin_load: plugin_info not found");
                 return null;
             }
 
             GetPluginInfo GetPluginInfo = (GetPluginInfo)Marshal.GetDelegateForFunctionPointer(GetInfoFunc,typeof(GetPluginInfo));
             GetPluginInfo(ref info);
 
-            console.debug("plugin_load: Found plugin: "+info.name+" Version "+info.version+".");
+            //console.debug("plugin_load: Found plugin: "+info.name+" Version "+info.version+".");
 
             /*
             // For high priority plugins (those that are explicitly loaded from the conf file)
