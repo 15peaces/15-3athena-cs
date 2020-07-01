@@ -6,14 +6,19 @@ using System.IO;
 using System.Net;
 using System.Collections.Generic;
 
+using n_common;
 using n_mmo;
 using n_timer;
 using showmsg;
 
 namespace n_socket
 {
-    public class socket
+    public class c_socket
     {
+        /// Use a shortlist of sockets instead of iterating all sessions for sockets 
+        /// that have data to send or need eof handling.
+        const bool SEND_SHORTLIST = true;
+
         const uint FD_SETSIZE = 4096;
 
         // initial recv buffer size (this will also be the max. size)
@@ -21,6 +26,12 @@ namespace n_socket
         const int RFIFO_SIZE = (2 * 1024);
         // initial send buffer size (will be resized as needed)
         const int WFIFO_SIZE = (16 * 1024);
+
+        // Maximum size of pending data in the write fifo. (for non-server connections)
+        // The connection is closed if it goes over the limit.
+        const int WFIFO_MAX = (1 * 1024 * 1024);
+
+        const int FIFOSIZE_SERVERLINK = (256 * 1024);
 
         static uint socket_max_client_packet;
 
@@ -31,23 +42,25 @@ namespace n_socket
 
         static UInt64 last_tick;
 
-        static socket_data[] session;
+        public socket_data[] session;
 
         int[] send_shortlist_array;
         int send_shortlist_count = 0;
-        static uint[] send_shortlist_set;
+        int[] send_shortlist_set;
 
-        struct socket_data
+        public class socket_data
         {
-            struct flag
+            public class c_flag
             {
-                byte eof;
-                byte server;
+                public bool eof;
+                public bool server;
                 char ping;
             }
+            public c_flag flag;
 
-            IPAddress client_addr;
+            public IPAddress client_addr;
 
+            public ushort rdata, wdata;
             public int max_rdata, max_wdata;
             public int rdata_size, wdata_size;
             public int rdata_pos;
@@ -57,14 +70,26 @@ namespace n_socket
             public string func_send;
             public string func_parse;
 
-            object session_data; // stores application-specific data related to the session            
+            static bool init;
+
+            object session_data; // stores application-specific data related to the session
+
+            static socket_data()
+            {
+                init = true;
+            }
+
+            public bool is_init()
+            {
+                return init;
+            }
         }
 
         //////////////////////////////
         // IP rules and DDoS protection
         struct AccessControl
         {
-            public static bool init;
+            static bool init;
             public IPAddress ip;
             public IPAddress mask;
 
@@ -108,7 +133,127 @@ namespace n_socket
         static List<AccessControl> access_allow;
         static List<AccessControl> access_deny;
 
-        static void create_session(int fd, string func_recv = "", string func_send = "", string func_parse = "")
+        public c_socket(timer timer)
+        {
+            socket_init(timer);
+        }
+
+        /// <summary>
+        /// socket I/O macros
+        /// </summary>
+        public void WFIFOHEAD(int fd, int size)
+        {
+            if (fd > 0 && session[fd].wdata_size + (size) > session[fd].max_wdata)
+                realloc_writefifo(fd, size);
+            return;
+        }
+        public int RFIFOP(int fd, int pos) { return session[fd].rdata + session[fd].rdata_size + pos; }
+        public int WFIFOP(int fd, int pos) { return session[fd].wdata + session[fd].wdata_size + pos; }
+        public ushort RFIFOW(int fd, int pos) { return (ushort)RFIFOP(fd, pos); }
+        public ushort WFIFOW(int fd, int pos) { return (ushort)WFIFOP(fd, pos); }
+
+        /// <summary
+        /// advance the WFIFO cursor (marking 'len' bytes for sending)
+        /// </sumary>
+        public void WFIFOSET(int fd, int len)
+        {
+            int newreserve;
+            socket_data s = session[fd];
+
+            if (!session_isValid(fd) || s.wdata <= 0)
+                return;
+
+            // we have written len bytes to the buffer already before calling WFIFOSET
+            if (s.wdata_size + len > s.max_wdata)
+            {   // actually there was a buffer overflow already
+                IPAddress ip = s.client_addr;
+                console.fatalerror("WFIFOSET: Write Buffer Overflow. Connection "+fd+" ("+ip.ToString()+") has written "+len+" bytes on a "+s.wdata_size+"/"+s.max_wdata+" bytes buffer.");
+                console.debug("Likely command that caused it: 0x"+ (s.wdata + s.wdata_size).ToString("x"));
+                // no other chance, make a better fifo model
+                Environment.Exit(1);
+            }
+
+            if (len > 0xFFFF)
+            {
+                // dynamic packets allow up to UINT16_MAX bytes (<packet_id>.W <packet_len>.W ...)
+                // all known fixed-size packets are within this limit, so use the same limit
+                console.fatalerror("WFIFOSET: Packet 0x"+(s.wdata + s.wdata_size).ToString("x")+" is too big. (len="+len+", max="+0xFFFF+")");
+                Environment.Exit(1);
+            }
+            else if (len == 0)
+            {
+                // abuses the fact, that the code that did WFIFOHEAD(fd,0), already wrote
+                // the packet type into memory, even if it could have overwritten vital data
+                // this can happen when a new packet was added on map-server, but packet len table was not updated
+                console.warning("WFIFOSET: Attempted to send zero-length packet, most likely 0x"+ WFIFOW(fd, 0).ToString("x4")+" (please report this).");
+                return;
+            }
+
+            if (!s.flag.server)
+            {
+                if (len > socket_max_client_packet)
+                {// see declaration of socket_max_client_packet for details
+                    console.error("WFIFOSET: Dropped too large client packet 0x" + WFIFOW(fd, 0).ToString("x4") + " (length=" + len + ", max=" + socket_max_client_packet + ").");
+                    return;
+                }
+                if (s.wdata_size + len > WFIFO_MAX)
+                {// reached maximum write fifo size
+                    console.error("WFIFOSET: Maximum write buffer size for client connection "+fd+ " exceeded, most likely caused by packet 0x" + WFIFOW(fd, 0).ToString("x4") + " (len="+len+", ip="+s.client_addr.ToString()+").");
+                    set_eof(fd);
+                    return;
+                }
+            }
+
+            s.wdata_size += len;
+            //If the interserver has 200% of its normal size full, flush the data.
+            if (s.flag.server && s.wdata_size >= 2 * FIFOSIZE_SERVERLINK)
+                flush_fifo(fd);
+
+            return;
+        }
+
+        /// <summary>
+        /// CORE : Default processing functions
+        /// </summary>
+        int null_recv(int fd) { return 0; }
+        int null_send(int fd) { return 0; }
+        int null_parse(int fd) { return 0; }
+
+        static string default_func_parse = "null_parse";
+        public void set_defaultparse(string defaultparse)
+        {
+            default_func_parse = defaultparse;
+        }
+
+        /// <summary>
+        ///	CORE : Socket Sub Function
+        /// </summary>
+        void set_eof(int fd)
+        {
+            if (session_isActive(fd))
+            {
+                if(SEND_SHORTLIST)
+                    // Add this socket to the shortlist for eof handling.
+                    send_shortlist_add_fd(fd);
+
+                session[fd].flag.eof = true;
+            }
+        }
+
+        /// <summary>
+        /// Best effort - there's no warranty that the data will be sent.
+        /// </summary>
+        void flush_fifo(int fd)
+        {
+            if (session[fd] != null)
+            {
+                object[] t = new object[1]; 
+                t[0] = fd;
+                common.CallFunc(GetType(), this, session[fd].func_send, t);
+            }
+        }
+
+        void create_session(int fd, string func_recv = "", string func_send = "", string func_parse = "")
         {
             session[fd].max_rdata = RFIFO_SIZE;
             session[fd].max_wdata = WFIFO_SIZE;
@@ -186,13 +331,39 @@ namespace n_socket
 
                 if (access_debug)
                 {
-                    console.information("socket.access_ipmask: Loaded IP: " + ip.ToString() + " mask:" + mask.ToString());
+                    console.info("socket.access_ipmask: Loaded IP: " + ip.ToString() + " mask:" + mask.ToString());
                 }
             }
             ret.ip = ip;
             ret.mask = mask;
 
             return ret;
+        }
+
+        void realloc_writefifo(int fd, int addition)
+        {
+            int newsize;
+
+            if (!session_isValid(fd)) // might not happen
+                return;
+
+            if (session[fd].wdata_size + addition > session[fd].max_wdata)
+            {   // grow rule; grow in multiples of WFIFO_SIZE
+                newsize = WFIFO_SIZE;
+                while (session[fd].wdata_size + addition > newsize) newsize += WFIFO_SIZE;
+            }
+            else
+            if (session[fd].max_wdata >= 2 * ((session[fd].flag.server) ? FIFOSIZE_SERVERLINK : WFIFO_SIZE)
+                && (session[fd].wdata_size + addition) * 4 < session[fd].max_wdata)
+            {   // shrink rule, shrink by 2 when only a quarter of the fifo is used, don't shrink below nominal size.
+                newsize = session[fd].max_wdata / 2;
+            }
+            else // no change
+                return;
+
+            session[fd].max_wdata = newsize;
+
+            return;
         }
 
         static private void config_read(string cfgName)
@@ -366,7 +537,17 @@ namespace n_socket
             return num;
         }
 
-        public static void socket_init(timer timer)
+        public bool session_isValid(int fd)
+        {
+            return (fd > 0 && fd < FD_SETSIZE && session[fd].is_init());
+        }
+
+        public bool session_isActive(int fd)
+        {
+            return (session_isValid(fd) && !session[fd].flag.eof);
+        }
+
+        public void socket_init(timer timer)
         {
             // Maximum packet size in bytes, which the client is able to handle.
             // Larger packets cause a buffer overflow and stack corruption.
@@ -384,12 +565,14 @@ namespace n_socket
             access_deny = new List<AccessControl>();
 
             session = new socket_data[FD_SETSIZE];
+            session[0] = new socket_data();
 
             // Get initial local ips
             addr_ = new short[16];
             naddr_ = getips(ref addr_, 16);
 
-            send_shortlist_set = new uint[(FD_SETSIZE + 31) / 32];
+            if (SEND_SHORTLIST)
+                send_shortlist_set = new int[(FD_SETSIZE + 31) / 32];
 
             config_read(SOCKET_CONF_FILENAME);
 
@@ -404,7 +587,39 @@ namespace n_socket
             connect_history = new ConnectHistory[0x10000];
             timer.add_timer_interval(timer.time(null) + 1000, "connect_check_clear", null , 0, 5 * 60 * 1000);
 
-            console.information("Server supports up to '"+FD_SETSIZE+"' concurrent connections.\n");
+            console.info("Server supports up to '"+FD_SETSIZE+"' concurrent connections.");
+        }
+
+        /// <summary>
+        /// Add a fd to the shortlist so that it'll be recognized as a fd that needs sending or eof handling.
+        /// </summary>
+        void send_shortlist_add_fd(int fd)
+        {
+            if (SEND_SHORTLIST)
+            {
+                int i;
+                int bit;
+
+                if (!session_isValid(fd))
+                    return;// out of range
+
+                i = fd / 32;
+                bit = fd % 32;
+
+                if ((send_shortlist_set[i] >> bit) == 1)
+                    return;// already in the list
+
+                if (send_shortlist_count >= send_shortlist_array.Length)
+                {
+                    console.debug("send_shortlist_add_fd: shortlist is full, ignoring... (fd="+fd+" shortlist.count="+send_shortlist_count+" shortlist.length="+send_shortlist_array.Length+")");
+                    return;
+                }
+
+                // set the bit
+                send_shortlist_set[i] |= 1 << bit;
+                // Add to the end of the shortlist array.
+                send_shortlist_array[send_shortlist_count++] = fd;
+            }
         }
     }
 }

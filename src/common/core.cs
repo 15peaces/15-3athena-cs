@@ -36,7 +36,7 @@ namespace n_core
             console.message("         (     -enhanced with 3rd class modification (15-3athena)      )     ", console.e_color.CL_DARK_READ, console.e_color.CL_CYAN);
             console.message("         (                  -re-written in modern C#                   )     ", console.e_color.CL_DARK_READ, console.e_color.CL_CYAN);
             console.message("         (=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=)     ", console.e_color.CL_DARK_READ, console.e_color.CL_CYAN);
-            console.information("Git Hash: " + GetGitHash());
+            console.info("Git Hash: " + GetGitHash());
         }
 
         // Won't do anything if runned alone...

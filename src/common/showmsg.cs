@@ -148,7 +148,7 @@ namespace showmsg
             return _vShowMessage(e_msg_type.MSG_SQL, message);
         }
 
-        public static bool information(string message)
+        public static bool info(string message)
         {
             return _vShowMessage(e_msg_type.MSG_INFORMATION, message);
         }
